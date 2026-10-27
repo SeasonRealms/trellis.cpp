@@ -6,13 +6,15 @@
 #include "gguf.h"
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
-#include "ggml-cpu.h"
-#ifdef TRELLIS_USE_CUDA
-#include "ggml-cuda.h"
-#endif
+//
+// No ggml-cpu.h / ggml-cuda.h: both backends are reached through the registry
+// (ggml-backend.h), so this translation unit stays linkable against a
+// GGML_BACKEND_DL=ON ggml - which exports neither ggml_backend_cpu_init() nor
+// ggml_backend_cuda_init() - as well as against a DL=OFF one.
 
 #include <cctype>
 #include <cstdint>
+#include <mutex>
 #include <thread>
 #include <cstdio>
 #include <cstdlib>
@@ -51,7 +53,20 @@ void tune_cpu_threads(ggml_backend* b) {
     }
     if (n <= 0) n = (int) std::thread::hardware_concurrency();
     if (n <= 0) n = 4;
-    ggml_backend_cpu_set_n_threads(b, n);
+    // ggml_backend_cpu_set_n_threads() is not part of the dllexported surface: with
+    // GGML_BACKEND_DL=ON it lives inside the CPU backend module, and with DL=OFF inside
+    // ggml-cpu. The registry's proc-address hook resolves it in either build (name and
+    // signature are ggml's documented "common function" contract).
+    ggml_backend_dev_t dev = ggml_backend_get_device(b);
+    ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+    auto set_n_threads = reg ? (ggml_backend_set_n_threads_t)
+        ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads") : nullptr;
+    if (set_n_threads) {
+        set_n_threads(b, n);
+    } else {
+        fprintf(stderr, "[trellis] CPU backend does not expose ggml_backend_set_n_threads; "
+                        "running with ggml's default thread count\n");
+    }
     fprintf(stderr, "[trellis] CPU backend: %d threads\n", n);
 }
 
@@ -73,19 +88,53 @@ static bool name_matches(const char* have, const std::string& want) {
     return true;
 }
 
+// A CUDA build carries CUDA-only kernels (deform_conv, decimate_qem) and no
+// Vulkan/metal counterparts, so a GPU device from another backend must never be
+// selected: deform_conv_run() would dispatch into CUDA on a device without a context.
+// That used to be impossible - a DL=OFF ggml only registered the backend it was
+// linked with - but a shared ggml (SeasonGGML builds CUDA *and* Vulkan) exposes both,
+// so the rule has to be stated. CPU and other non-GPU devices are always usable.
+static bool device_usable(ggml_backend_dev_t d) {
+#ifdef TRELLIS_USE_CUDA
+    const enum ggml_backend_dev_type t = ggml_backend_dev_type(d);
+    if (t == GGML_BACKEND_DEVICE_TYPE_GPU || t == GGML_BACKEND_DEVICE_TYPE_IGPU) {
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(d);
+        return std::strcmp(reg ? ggml_backend_reg_name(reg) : "", "CUDA") == 0;
+    }
+#else
+    (void) d;
+#endif
+    return true;
+}
+
 // Devices whose ggml backend registration (e.g. "Vulkan", "Hexagon", "CPU") or device
 // name (e.g. "Vulkan0") matches `want`, in registration order.
 static std::vector<ggml_backend_dev_t> devices_named(const std::string& want) {
     std::vector<ggml_backend_dev_t> out;
     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
         ggml_backend_dev_t d = ggml_backend_dev_get(i);
-        if (!d) continue;
+        if (!d || !device_usable(d)) continue;
         if (name_matches(ggml_backend_reg_name(ggml_backend_dev_backend_reg(d)), want) ||
             name_matches(ggml_backend_dev_name(d), want)) {
             out.push_back(d);
         }
     }
     return out;
+}
+
+// True when the name matches a registered device that device_usable() rejected. Only
+// used to keep `--backend Vulkan` on a CUDA build from reporting "no backend named
+// 'Vulkan' in this build" - it is registered, it just has no kernel in this build.
+static bool registered_but_unusable(const std::string& want) {
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        ggml_backend_dev_t d = ggml_backend_dev_get(i);
+        if (!d || device_usable(d)) continue;
+        if (name_matches(ggml_backend_reg_name(ggml_backend_dev_backend_reg(d)), want) ||
+            name_matches(ggml_backend_dev_name(d), want)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void list_backends(FILE* f) {
@@ -95,7 +144,43 @@ static void list_backends(FILE* f) {
     fprintf(f, "\n");
 }
 
+void ensure_backends_loaded() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        // Already loaded by another package in this process? llama.cpp calls
+        // ggml_backend_load_all() itself and this dll can sit next to llama.dll, and
+        // ggml's registration has no dedup: a second load_all() registers every backend
+        // again, so every device shows up twice and --gpu indexes duplicates. Whoever
+        // got here first wins - both callers look at the same files.
+        if (ggml_backend_reg_count() > 0) return;
+        // DL=ON: ggml-cpu / ggml-cuda / ggml-vulkan are modules next to ggml.dll, and
+        // nothing is registered until they are loaded - without this every dev_count()
+        // and dev_get() below would see an empty registry. DL=OFF: compiled no-op.
+        ggml_backend_load_all();
+    });
+}
+
+ggml_backend* cpu_backend_init() {
+    ensure_backends_loaded();
+    // The registry already picked the best CPU variant (ggml-cpu-<isa>.dll under DL=ON),
+    // so the first CPU device is the one a bare ggml_backend_cpu_init() would have built.
+    ggml_backend_dev_t dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    return dev ? ggml_backend_dev_init(dev, nullptr) : nullptr;
+}
+
+ggml_backend* cuda_backend_init(int gpu) {
+    ensure_backends_loaded();
+    const std::vector<ggml_backend_dev_t> devs = devices_named("CUDA");
+    if (devs.empty()) return nullptr;
+    const size_t idx = (gpu > 0 && (size_t) gpu < devs.size()) ? (size_t) gpu : 0;
+    if (gpu > 0 && idx != (size_t) gpu)
+        fprintf(stderr, "[trellis] --gpu %d out of range for CUDA (%zu device(s)); using 0\n",
+                gpu, devs.size());
+    return ggml_backend_dev_init(devs[idx], nullptr);
+}
+
 static ggml_backend* make_backend(int gpu) {
+    ensure_backends_loaded();
     // An explicit --backend wins over everything below. This matters on Snapdragon,
     // where the Hexagon NPU and the Adreno GPU both register as
     // GGML_BACKEND_DEVICE_TYPE_GPU: the "largest reported memory" heuristic further
@@ -104,6 +189,9 @@ static ggml_backend* make_backend(int gpu) {
     if (const std::string want = requested_backend(); !want.empty()) {
         std::vector<ggml_backend_dev_t> devs = devices_named(want);
         if (devs.empty()) {
+            if (registered_but_unusable(want))
+                throw std::runtime_error("[trellis] backend '" + want + "' is registered but has no "
+                                         "kernel in this build - a CUDA build runs on CUDA only");
             fprintf(stderr, "[trellis] no backend named '%s' in this build\n", want.c_str());
             list_backends(stderr);
             throw std::runtime_error("[trellis] unknown backend: " + want);
@@ -124,10 +212,13 @@ static ggml_backend* make_backend(int gpu) {
     }
 
     // gpu < 0 is an explicit request for CPU.
-    if (gpu < 0) { ggml_backend* b = ggml_backend_cpu_init(); tune_cpu_threads(b); return b; }
+    if (gpu < 0) { ggml_backend* b = cpu_backend_init(); tune_cpu_threads(b); return b; }
 #ifdef TRELLIS_USE_CUDA
     {
-        ggml_backend* b = ggml_backend_cuda_init(gpu);
+        // CUDA first, so that a shared ggml exposing several GPU backends (SeasonGGML
+        // builds Vulkan as well) still resolves to CUDA, and --gpu keeps indexing CUDA
+        // devices rather than "all GPU devices".
+        ggml_backend* b = cuda_backend_init(gpu);
         if (b) return b;
         fprintf(stderr, "[trellis] CUDA init failed on device %d\n", gpu);
     }
@@ -145,8 +236,13 @@ static ggml_backend* make_backend(int gpu) {
             if (!d) continue;
             enum ggml_backend_dev_type t = ggml_backend_dev_type(d);
             // IGPU: integrated GPUs (e.g. Vulkan on a UMA APU) report a distinct type.
-            if (t == GGML_BACKEND_DEVICE_TYPE_GPU || t == GGML_BACKEND_DEVICE_TYPE_IGPU)
+            // device_usable() drops a non-CUDA GPU in a CUDA build; CUDA itself was
+            // already attempted above, so reaching here means it is unusable and CPU is
+            // the correct fallback.
+            if ((t == GGML_BACKEND_DEVICE_TYPE_GPU || t == GGML_BACKEND_DEVICE_TYPE_IGPU) &&
+                device_usable(d)) {
                 gpus.push_back(d);
+            }
         }
         ggml_backend_dev_t chosen = nullptr;
         size_t chosen_mem = 0;
@@ -180,7 +276,7 @@ static ggml_backend* make_backend(int gpu) {
             "[trellis] no usable GPU backend found and --require-gpu is set; refusing CPU fallback.");
     }
     fprintf(stderr, "[trellis] no GPU backend available; falling back to CPU\n");
-    { ggml_backend* b = ggml_backend_cpu_init(); tune_cpu_threads(b); return b; }
+    { ggml_backend* b = cpu_backend_init(); tune_cpu_threads(b); return b; }
 }
 
 // Reuse backend instances across sequential model stages. In particular, repeatedly

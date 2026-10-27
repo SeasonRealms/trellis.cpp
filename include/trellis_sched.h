@@ -44,6 +44,28 @@ ggml_backend_sched_t make_sched(ggml_backend_t primary);
 // ggml's 4-thread default would quietly become the bottleneck.
 void tune_cpu_threads(ggml_backend_t b);
 
+// --- backend registry -------------------------------------------------------
+//
+// ggml may be built with GGML_BACKEND_DL=ON, in which case ggml-cpu and ggml-cuda are
+// separate modules that ggml.dll discovers at run time instead of libraries linked into
+// this binary. ggml_backend_cpu_init() / ggml_backend_cuda_init() only exist in a DL=OFF
+// link (and a DL=ON ggml does not even compile in GGML_USE_CUDA), so every entry point
+// goes through the generic registry API instead: the three helpers below are the portable
+// replacements, and ensure_backends_loaded() is the discovery step that makes the registry
+// non-empty in the first place (a compiled no-op with DL=OFF).
+//
+// The registry reports whatever the ambient ggml.dll provides, which is how a trellis
+// worker can share SeasonGGML's ggml-cpu-<variant>.dll + ggml-cuda.dll instead of
+// shipping a second, differently configured copy of ggml.
+void ensure_backends_loaded();
+
+// Fresh CPU backend from the registry, or nullptr. Caller owns it.
+ggml_backend_t cpu_backend_init();
+
+// Fresh CUDA backend for CUDA device `gpu` (negative = device 0), or nullptr when the
+// registry has no CUDA device. Caller owns it.
+ggml_backend_t cuda_backend_init(int gpu);
+
 // Allocation + execution strategy for one graph.
 //
 // Both paths follow the same contract, which mirrors what the call sites already did:

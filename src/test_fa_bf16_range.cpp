@@ -8,7 +8,7 @@
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
-#include "ggml-cuda.h"
+#include "trellis_sched.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
     const float output_scale = 1.0f / graph_scale;
     const float expected = ggml_bf16_to_fp32(ggml_fp32_to_bf16(requested * graph_scale)) * output_scale;
 
-    ggml_backend_t backend = ggml_backend_cuda_init(gpu);
+    ggml_backend_t backend = trellis::cuda_backend_init(gpu);
     if (!backend) {
         std::fprintf(stderr, "failed to initialize CUDA device %d\n", gpu);
         return 1;

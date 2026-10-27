@@ -8,7 +8,7 @@
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
-#include "ggml-cuda.h"
+#include "trellis_sched.h"
 
 #include <algorithm>
 #include <cmath>
@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    ggml_backend_t backend = ggml_backend_cuda_init(gpu);
+    ggml_backend_t backend = trellis::cuda_backend_init(gpu);
     if (!backend) {
         std::fprintf(stderr, "failed to initialize CUDA device %d\n", gpu);
         return 1;

@@ -3,8 +3,6 @@
 #include "trellis_debug.h"
 #include "trellis_model.h"
 
-#include "ggml-cpu.h"
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -46,7 +44,7 @@ void set_vulkan_fallback_mode(int mode) { g_vulkan_fallback_mode = mode; }
 
 ggml_backend_t fallback_cpu_backend() {
     std::call_once(g_cpu_once, [] {
-        g_cpu = ggml_backend_cpu_init();
+        g_cpu = cpu_backend_init();
         if (g_cpu) tune_cpu_threads(g_cpu);
     });
     return g_cpu;
@@ -54,6 +52,7 @@ ggml_backend_t fallback_cpu_backend() {
 
 const std::vector<ggml_backend_t>& vulkan_backends() {
     std::call_once(g_vulkan_once, [] {
+        ensure_backends_loaded();
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
             ggml_backend_dev_t d = ggml_backend_dev_get(i);
             ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(d);

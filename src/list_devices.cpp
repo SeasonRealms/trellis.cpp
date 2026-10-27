@@ -1,6 +1,7 @@
 // Enumerate registered ggml devices and optionally initialize them.
 
 #include "ggml-backend.h"
+#include "trellis_sched.h"
 
 #include <cstdio>
 #include <cstddef>
@@ -24,6 +25,10 @@ static double to_mib(size_t bytes) {
 int main(int argc, char** argv) {
     const bool probe = (argc > 1 && std::string_view(argv[1]) == "--init");
     bool init_failed = false;
+
+    // With GGML_BACKEND_DL=ON the registry starts empty; this loads the backend modules
+    // that sit next to ggml.dll (a no-op when they are linked in instead).
+    trellis::ensure_backends_loaded();
 
     printf("registered backends: %zu\n", ggml_backend_reg_count());
     for (size_t i = 0; i < ggml_backend_reg_count(); ++i) {

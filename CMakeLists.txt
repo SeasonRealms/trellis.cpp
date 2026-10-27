@@ -121,7 +121,20 @@ add_library(trellis_core STATIC
 )
 target_include_directories(trellis_core PUBLIC include ${GGML_DIR}/include ${CMAKE_SOURCE_DIR}/thirdparty/stb ${CMAKE_SOURCE_DIR}/thirdparty/xatlas ${CMAKE_SOURCE_DIR}/thirdparty/meshoptimizer ${CMAKE_SOURCE_DIR}/thirdparty/fqms)
 target_compile_definitions(trellis_core PRIVATE TRELLIS_GIT_COMMIT="${TRELLIS_GIT_COMMIT}" TRELLIS_GIT_DIRTY=${TRELLIS_GIT_DIRTY} TRELLIS_BUILD_TIMESTAMP="${TRELLIS_BUILD_TIMESTAMP_UTC}" TRELLIS_APP_VERSION="${TRELLIS_APP_VERSION}")
-target_link_libraries(trellis_core PUBLIC ggml ggml-base ggml-cpu)
+# ggml linkage depends on GGML_BACKEND_DL. With DL=OFF every backend is an ordinary
+# library that ggml links in, and its symbols are part of ggml.dll; with DL=ON (how
+# SeasonGGML builds ggml) a backend is a MODULE that ggml.dll dlopen()s, it has no
+# import library to link against, and ggml.dll does not even carry GGML_USE_<BACKEND>.
+# trellis therefore links only ggml + ggml-base in the DL build and reaches the
+# backends through the registry API (see ensure_backends_loaded() in
+# src/trellis_model.cpp), which lets one ggml runtime serve trellis and every other
+# SeasonEngine AI package instead of each shipping its own copy.
+if(GGML_BACKEND_DL)
+  target_link_libraries(trellis_core PUBLIC ggml ggml-base)
+  message(STATUS "trellis.cpp: ggml built with GGML_BACKEND_DL=ON - backends are loaded at run time")
+else()
+  target_link_libraries(trellis_core PUBLIC ggml ggml-base ggml-cpu)
+endif()
 
 add_executable(trellis-refine-core tools/mesh_quad_matching/selective_refinement_core.cpp)
 target_link_libraries(trellis-refine-core PRIVATE trellis_core)
@@ -215,7 +228,12 @@ if(TRELLIS_WEBP)
 endif()
 if(TARGET ggml-cuda)
   target_compile_definitions(trellis_core PUBLIC TRELLIS_USE_CUDA)
-  target_link_libraries(trellis_core PUBLIC ggml-cuda)
+  # DL=ON: ggml-cuda is a MODULE loaded by ggml.dll at run time, so there is nothing to
+  # link - TRELLIS_USE_CUDA still gates the CUDA sources below, and the backend itself is
+  # picked from the registry (cuda_backend_init()).
+  if(NOT GGML_BACKEND_DL)
+    target_link_libraries(trellis_core PUBLIC ggml-cuda)
+  endif()
   target_sources(trellis_core PRIVATE src/deform_conv.cu)
   # Self-contained CUDA QEM decimation (mirrors the CPU port; uses cub for scan/sort/RLE).
   target_sources(trellis_core PRIVATE src/decimate_qem.cu)
@@ -279,7 +297,9 @@ else()
 endif()
 if(TARGET ggml-vulkan)
   set(TRELLIS_BUILD_BACKEND "vulkan")
-  target_link_libraries(trellis_core PUBLIC ggml-vulkan)
+  if(NOT GGML_BACKEND_DL)
+    target_link_libraries(trellis_core PUBLIC ggml-vulkan)
+  endif()
   message(STATUS "trellis.cpp: Vulkan backend enabled")
 endif()
 if(TARGET ggml-metal)
@@ -288,12 +308,16 @@ if(TARGET ggml-metal)
   # the Metal GPU automatically; the two custom kernels (deform_conv,
   # decimate_qem) run their CPU fallbacks on this backend.
   set(TRELLIS_BUILD_BACKEND "metal")
-  target_link_libraries(trellis_core PUBLIC ggml-metal)
+  if(NOT GGML_BACKEND_DL)
+    target_link_libraries(trellis_core PUBLIC ggml-metal)
+  endif()
   message(STATUS "trellis.cpp: Metal backend enabled")
 endif()
 if(TARGET ggml-hip)
   set(TRELLIS_BUILD_BACKEND "hip")
-  target_link_libraries(trellis_core PUBLIC ggml-hip)
+  if(NOT GGML_BACKEND_DL)
+    target_link_libraries(trellis_core PUBLIC ggml-hip)
+  endif()
   # Compile the self-contained QEM decimation kernel as HIP (ggml enabled the HIP
   # language via its subdirectory). hipcub headers live under the ROCm include root.
   enable_language(HIP)

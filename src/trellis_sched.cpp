@@ -88,7 +88,7 @@ ggml_backend_sched_t make_sched(ggml_backend_t primary) {
         std::strncmp(ggml_backend_name(primary), "HTP", 3) == 0) {
         for (ggml_backend_t b : vulkan_backends()) backends.push_back(b);
     }
-    if (!ggml_backend_is_cpu(primary)) {
+    if (!backend_is_cpu(primary)) {
         if (ggml_backend_t cpu = fallback_cpu_backend()) backends.push_back(cpu);
     }
 

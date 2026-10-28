@@ -46,7 +46,7 @@ std::string g_backend;        // --backend NAME;  set by trellis_run
 
 // Tune both an explicitly selected CPU backend and the scheduler's CPU fallback.
 void tune_cpu_threads(ggml_backend* b) {
-    if (!b || !ggml_backend_is_cpu(b)) return;
+    if (!b || !backend_is_cpu(b)) return;
     int n = g_cpu_threads;
     if (n <= 0) {
         if (const char* e = std::getenv("TRELLIS_THREADS")) n = atoi(e);
@@ -166,6 +166,13 @@ ggml_backend* cpu_backend_init() {
     // so the first CPU device is the one a bare ggml_backend_cpu_init() would have built.
     ggml_backend_dev_t dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
     return dev ? ggml_backend_dev_init(dev, nullptr) : nullptr;
+}
+
+bool backend_is_cpu(ggml_backend_t b) {
+    // ggml_backend_is_cpu() is ggml-cpu's own API and does not exist in a DL=ON build,
+    // so ask the device the backend was created from instead.
+    ggml_backend_dev_t dev = b ? ggml_backend_get_device(b) : nullptr;
+    return dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
 }
 
 ggml_backend* cuda_backend_init(int gpu) {
@@ -389,7 +396,7 @@ Model Model::load(const std::string& path, int gpu) {
     }
 
     m.backend = shared_backend(gpu);
-    m.on_gpu  = !ggml_backend_is_cpu(m.backend);
+    m.on_gpu  = !backend_is_cpu(m.backend);
 
     // Backends can expose an extra buffer type that performs device-specific weight
     // repacking during upload. Hexagon requires this for its tiled quantized matmuls.
@@ -399,7 +406,7 @@ Model Model::load(const std::string& path, int gpu) {
         ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
         // CPU repacking requires a per-tensor support check that this loader does not yet
         // implement, so keep the generic CPU path unchanged.
-        if (dev && ggml_backend_is_cpu(m.backend)) {
+        if (dev && backend_is_cpu(m.backend)) {
             if (verbose())
                 fprintf(stderr, "[trellis:dbg] extra-bufts: skipped on the CPU backend\n");
             reg = nullptr;

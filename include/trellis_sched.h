@@ -62,6 +62,11 @@ void ensure_backends_loaded();
 // Fresh CPU backend from the registry, or nullptr. Caller owns it.
 ggml_backend_t cpu_backend_init();
 
+// True when `b` runs on a CPU device. The answer comes from the registry, which is the
+// only surface a DL=ON ggml.dll has: ggml_backend_is_cpu() belongs to ggml-cpu and is
+// therefore neither declared for nor linkable against a dynamic-backend build.
+bool backend_is_cpu(ggml_backend_t b);
+
 // Fresh CUDA backend for CUDA device `gpu` (negative = device 0), or nullptr when the
 // registry has no CUDA device. Caller owns it.
 ggml_backend_t cuda_backend_init(int gpu);
